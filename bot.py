@@ -1,31 +1,34 @@
 import asyncio
 import logging
+import random
 import aiohttp
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils import executor
+from aiogram.enums import ParseMode
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram import F
+
+from aiogram.filters import CommandStart, Command
 
 API_TOKEN = '7781770592:AAEWu3-3wKGi8rFEOv6UImMTpCkZxLY1dro'
 YANDEX_PUBLIC_LINK = 'https://disk.yandex.ru/d/ueRhAeMAuJ2OBg'
 
-# Включаем логирование
 logging.basicConfig(level=logging.INFO)
 
-# Инициализация бота и диспетчера
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher(storage=MemoryStorage())
 
-# Временное хранилище состояний игр пользователей
 user_games = {}
 
-# Кнопки
-start_kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Начало игры", callback_data="start_game"))
-next_kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Следующая картинка", callback_data="next"))
+start_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Начало игры", callback_data="start_game")]
+])
+
+next_kb = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="Следующая картинка", callback_data="next")]
+])
 
 def extract_file_links(data):
-    """
-    Извлекает прямые ссылки на картинки из ответа Яндекс API
-    """
     items = data.get('_embedded', {}).get('items', [])
     links = [item['file'] for item in items if item['name'].endswith('.png') and 'file' in item]
     return links
@@ -37,21 +40,27 @@ async def fetch_image_links():
             data = await resp.json()
             return extract_file_links(data)
 
-@dp.message_handler(commands=['start'])
+@dp.message(CommandStart())
 async def cmd_start(message: types.Message):
+    await bot.set_my_commands([], scope=types.BotCommandScopeDefault())  # Убираем меню команд
     await message.answer("Привет! Это игра 'Крокодил'. Жми 'Начало игры', чтобы начать!", reply_markup=start_kb)
 
-@dp.callback_query_handler(lambda c: c.data == 'start_game')
+@dp.callback_query(lambda c: c.data == 'start_game')
 async def start_game(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     images = await fetch_image_links()
     if not images:
         await callback_query.message.answer("Не удалось загрузить картинки. Попробуйте позже.")
         return
-    user_games[user_id] = {'images': images, 'current_msg': None}
+    random.shuffle(images)
+    user_games[user_id] = {
+        'images': images,
+        'original_total': len(images),
+        'current_msg': None
+    }
     await send_next_image(callback_query.message, user_id)
 
-@dp.callback_query_handler(lambda c: c.data == 'next')
+@dp.callback_query(lambda c: c.data == 'next')
 async def next_image(callback_query: types.CallbackQuery):
     user_id = callback_query.from_user.id
     await send_next_image(callback_query.message, user_id)
@@ -66,16 +75,29 @@ async def send_next_image(message, user_id):
             await bot.delete_message(chat_id=message.chat.id, message_id=game['current_msg'])
         except:
             pass
+    current_number = game['original_total'] - len(game['images']) + 1
+    total_number = game['original_total']
     image_url = game['images'].pop(0)
-    msg = await bot.send_photo(chat_id=message.chat.id, photo=image_url, reply_markup=next_kb)
+    caption = f"Картинка {current_number} из {total_number}"
+    msg = await bot.send_photo(chat_id=message.chat.id, photo=image_url, caption=caption, reply_markup=next_kb)
     game['current_msg'] = msg.message_id
 
-@dp.message_handler(lambda message: message.text and message.text.lower() == "конец")
+@dp.message(F.text.lower() == "конец")
 async def end_game(message: types.Message):
     user_id = message.from_user.id
     if user_id in user_games:
         del user_games[user_id]
     await message.answer("Игра окончена! Спасибо за участие 🎉")
 
+@dp.message(Command("reset"))
+async def reset_game(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in user_games:
+        del user_games[user_id]
+    await message.answer("Игра сброшена. Напиши /start, чтобы начать заново.")
+
+async def main():
+    await dp.start_polling(bot)
+
 if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+    asyncio.run(main())
